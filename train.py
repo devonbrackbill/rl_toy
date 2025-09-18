@@ -95,27 +95,41 @@ def imitation_learning_step(frame_diffs, actions):
   # Convert actions to binary: 2 (UP) -> 1, 3 (DOWN) -> 0
   y_true = (actions == 2).astype(np.float64)
   
-  # Forward pass
-  h = np.dot(model['W1'], frame_diffs.T)
-  h[h < 0] = 0  # ReLU
-  logp = np.dot(model['W2'], h)
-  p = sigmoid(logp)
+  # Forward pass - process each frame difference individually
+  total_loss = 0
+  dW1_accum = np.zeros_like(model['W1'])
+  dW2_accum = np.zeros_like(model['W2'])
   
-  # Compute loss (binary cross-entropy)
-  loss = -np.mean(y_true * np.log(p + 1e-8) + (1 - y_true) * np.log(1 - p + 1e-8))
+  for i in range(len(frame_diffs)):
+    x = frame_diffs[i]  # 6400-dimensional vector
+    y = y_true[i]       # scalar target
+    
+    # Forward pass
+    h = np.dot(model['W1'], x)  # h is 200-dimensional
+    h[h < 0] = 0  # ReLU
+    logp = np.dot(model['W2'], h)  # scalar
+    p = sigmoid(logp)
+    
+    # Compute loss (binary cross-entropy)
+    loss = -(y * np.log(p + 1e-8) + (1 - y) * np.log(1 - p + 1e-8))
+    total_loss += loss
+    
+    # Compute gradients
+    dlogp = p - y  # scalar
+    dW2 = dlogp * h  # 200-dimensional
+    dh = dlogp * model['W2']  # 200-dimensional
+    dh[h <= 0] = 0  # backprop through ReLU
+    dW1 = np.outer(dh, x)  # 200x6400 matrix
+    
+    # Accumulate gradients
+    dW1_accum += dW1
+    dW2_accum += dW2
   
-  # Compute gradients
-  dlogp = p - y_true
-  dW2 = np.dot(h, dlogp) / len(frame_diffs)
-  dh = np.outer(dlogp, model['W2'])
-  dh[h <= 0] = 0  # backprop through ReLU
-  dW1 = np.dot(frame_diffs.T, dh) / len(frame_diffs)
+  # Update model with averaged gradients
+  model['W1'] -= imitation_learning_rate * dW1_accum / len(frame_diffs)
+  model['W2'] -= imitation_learning_rate * dW2_accum / len(frame_diffs)
   
-  # Update model
-  model['W1'] -= imitation_learning_rate * dW1
-  model['W2'] -= imitation_learning_rate * dW2
-  
-  return loss
+  return total_loss / len(frame_diffs)
 
 env = gym.make("ALE/Pong-v5")
 observation, info = env.reset()
@@ -125,7 +139,7 @@ running_reward = None
 reward_sum = 0
 episode_number = 0
 
-# Load human demonstrations for imitation learning
+# Load human demonstrations for imitation learnings
 human_data = None
 if use_imitation:
   human_data = load_human_demonstrations()
