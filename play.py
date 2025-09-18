@@ -8,8 +8,17 @@ env = gym.make("ALE/Pong-v5", render_mode="rgb_array")
 # Wrap to save MP4s of your play (every episode)
 env = RecordVideo(env, video_folder="human_pong", name_prefix="human", episode_trigger=lambda ep: True)
 
-# Keyboard → Atari actions (0=NOOP, 1=FIRE, 2=UP, 3=DOWN for training compatibility)
-keys_to_action = {" ": 1, "w": 2, "s": 3}  # Changed "s": 5 to "s": 3
+# Keyboard → Atari actions (0=NOOP, 1=FIRE, 2=RIGHT/UP, 3=LEFT/DOWN)
+# Try multiple possible key names for arrow keys
+keys_to_action = {
+    " ": 1,           # Space for FIRE
+    "ArrowUp": 2,     # Up arrow
+    "ArrowDown": 3,   # Down arrow
+    "up": 2,          # Alternative up
+    "down": 3,        # Alternative down
+    "w": 2,           # W key as backup
+    "s": 3            # S key as backup
+}
 traj = {"frame_diffs": [], "actions": [], "rewards": [], "terminated": [], "truncated": []}
 
 def prepro(I):
