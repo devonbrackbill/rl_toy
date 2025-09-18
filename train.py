@@ -15,9 +15,9 @@ render = False
 
 # imitation learning parameters
 use_imitation = True # whether to use human demonstrations
-imitation_episodes = 20 # how many episodes to train on human data before switching to RL
-imitation_learning_rate = 5e-3 # learning rate for imitation learning (usually higher than RL)
-imitation_batch_size = 50 # process data in smaller batches for better learning
+imitation_episodes = 1000 # how many episodes to train on human data before switching to RL
+imitation_learning_rate = 1e-1 # learning rate for imitation learning (much higher!)
+imitation_batch_size = 200 # larger batches for more stable gradients
 
 # model initialization
 D = 80 * 80 # input dimensionality: 80x80 grid
@@ -92,7 +92,7 @@ def load_human_demonstrations():
   return frame_diffs, actions
 
 def imitation_learning_step(frame_diffs, actions):
-  """ Perform one step of imitation learning using supervised learning with batching """
+  """ Perform one step of imitation learning using a more direct approach """
   # Filter out NOOP actions (action 0) - we only want UP/DOWN actions
   active_mask = (actions == 2) | (actions == 3)
   if np.sum(active_mask) == 0:
@@ -105,47 +105,31 @@ def imitation_learning_step(frame_diffs, actions):
   # Convert actions to binary: 2 (RIGHT/UP) -> 1, 3 (LEFT/DOWN) -> 0
   y_true = (active_actions == 2).astype(np.float64)
   
-  total_loss = 0
-  dW1_accum = np.zeros_like(model['W1'])
-  dW2_accum = np.zeros_like(model['W2'])
+  # Use all data at once for stronger learning signal
+  X = active_frame_diffs.T  # (6400, num_samples)
+  y = y_true  # (num_samples,)
   
-  # Process in batches for better learning
-  batch_size = min(imitation_batch_size, len(active_frame_diffs))
-  num_batches = len(active_frame_diffs) // batch_size
+  # Forward pass
+  h = np.dot(model['W1'], X)  # (200, num_samples)
+  h[h < 0] = 0  # ReLU
+  logits = np.dot(model['W2'], h)  # (num_samples,)
+  p = sigmoid(logits)
   
-  for batch_idx in range(num_batches):
-    start_idx = batch_idx * batch_size
-    end_idx = start_idx + batch_size
-    batch_x = active_frame_diffs[start_idx:end_idx]
-    batch_y = y_true[start_idx:end_idx]
-    
-    # Forward pass for batch
-    h = np.dot(model['W1'], batch_x.T)  # h is (200, batch_size)
-    h[h < 0] = 0  # ReLU
-    logp = np.dot(model['W2'], h)  # (batch_size,)
-    p = sigmoid(logp)
-    
-    # Compute loss (binary cross-entropy)
-    loss = -(batch_y * np.log(p + 1e-8) + (1 - batch_y) * np.log(1 - p + 1e-8))
-    total_loss += np.mean(loss)
-    
-    # Compute gradients
-    dlogp = p - batch_y  # (batch_size,)
-    dW2 = np.dot(h, dlogp) / batch_size  # (200,)
-    dh = np.outer(dlogp, model['W2'])  # (batch_size, 200)
-    dh[h.T <= 0] = 0  # backprop through ReLU
-    dW1 = np.dot(dh.T, batch_x) / batch_size  # (200, 6400)
-    
-    # Accumulate gradients
-    dW1_accum += dW1
-    dW2_accum += dW2
+  # Compute loss (binary cross-entropy)
+  loss = -np.mean(y * np.log(p + 1e-8) + (1 - y) * np.log(1 - p + 1e-8))
   
-  # Update model with averaged gradients
-  if num_batches > 0:
-    model['W1'] -= imitation_learning_rate * dW1_accum / num_batches
-    model['W2'] -= imitation_learning_rate * dW2_accum / num_batches
+  # Compute gradients
+  dlogits = p - y  # (num_samples,)
+  dW2 = np.dot(h, dlogits) / len(y)  # (200,)
+  dh = np.outer(dlogits, model['W2'])  # (num_samples, 200)
+  dh[h.T <= 0] = 0  # backprop through ReLU
+  dW1 = np.dot(dh.T, X.T) / len(y)  # (200, 6400)
   
-  return total_loss / num_batches if num_batches > 0 else 0.0
+  # Update model with much stronger learning
+  model['W1'] -= imitation_learning_rate * dW1
+  model['W2'] -= imitation_learning_rate * dW2
+  
+  return loss
 
 env = gym.make("ALE/Pong-v5")
 observation, info = env.reset()
@@ -169,24 +153,40 @@ if use_imitation:
     
     for i in range(imitation_episodes):
       loss = imitation_learning_step(frame_diffs, actions)
-      print(f"Imitation episode {i+1}/{imitation_episodes}, loss: {loss:.4f}")
       
-      # Test the policy after every 5 episodes
-      if (i + 1) % 5 == 0:
+      # Show gradient norms and model statistics
+      if (i + 1) % 10 == 0:
+        w1_norm = np.linalg.norm(model['W1'])
+        w2_norm = np.linalg.norm(model['W2'])
+        w1_change = np.linalg.norm(model['W1'] - getattr(imitation_learning_step, 'prev_W1', model['W1']))
+        w2_change = np.linalg.norm(model['W2'] - getattr(imitation_learning_step, 'prev_W2', model['W2']))
+        print(f"Imitation episode {i+1}/{imitation_episodes}, loss: {loss:.4f}, W1_norm: {w1_norm:.3f}, W2_norm: {w2_norm:.3f}, W1_change: {w1_change:.6f}, W2_change: {w2_change:.6f}")
+        imitation_learning_step.prev_W1 = model['W1'].copy()
+        imitation_learning_step.prev_W2 = model['W2'].copy()
+      else:
+        print(f"Imitation episode {i+1}/{imitation_episodes}, loss: {loss:.4f}")
+      
+      # Test the policy after every 10 episodes
+      if (i + 1) % 10 == 0:
         test_obs, _ = env.reset()
         test_prev_x = None
         test_reward = 0
+        test_actions = []
         for _ in range(100):  # Test for 100 steps
           cur_x = prepro(test_obs)
           x = cur_x - test_prev_x if test_prev_x is not None else np.zeros(D)
           test_prev_x = cur_x
           aprob, _ = policy_forward(x)
           action = 2 if np.random.uniform() < aprob else 3  # 2=RIGHT/UP, 3=LEFT/DOWN
+          test_actions.append(action)
           test_obs, reward, terminated, truncated, _ = env.step(action)
           test_reward += reward
           if terminated or truncated:
             break
-        print(f"  Test reward after episode {i+1}: {test_reward}")
+        
+        # Show action distribution in test
+        action_counts = np.bincount(test_actions)
+        print(f"  Test reward after episode {i+1}: {test_reward}, actions: {action_counts}")
         
     print("Imitation learning complete! Switching to reinforcement learning...")
   else:
