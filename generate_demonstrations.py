@@ -13,12 +13,14 @@ num_episodes = 10  # number of episodes to record
 output_dir = "model_demonstrations"  # directory to save demonstrations
 
 # Load the trained model
-print("Loading trained model from save.p...")
-model = pickle.load(open('save.p', 'rb'))
+print("Loading trained model from save 18plus.p...")
+model = pickle.load(open('save 18plus.p', 'rb'))
 print(f"Model loaded. W1 shape: {model['W1'].shape}, W2 shape: {model['W2'].shape}")
 
-def sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-x))
+def softmax(x):
+    """Compute softmax values for each sets of scores in x."""
+    exp_x = np.exp(x - np.max(x))  # subtract max for numerical stability
+    return exp_x / np.sum(exp_x, axis=0, keepdims=True)
 
 def prepro(I):
     """ prepro 210x160x3 uint8 frame into 6400 (80x80) 1D float vector """
@@ -32,8 +34,8 @@ def prepro(I):
 def policy_forward(x):
     h = np.dot(model['W1'], x)
     h[h<0] = 0  # ReLU nonlinearity
-    logp = np.dot(model['W2'], h)
-    p = sigmoid(logp)
+    logits = np.dot(model['W2'], h)  # (3,) - logits for NOOP/UP/DOWN
+    p = softmax(logits)  # (3,) - probabilities for NOOP/UP/DOWN
     return p, h
 
 # Create output directory if it doesn't exist
@@ -72,7 +74,9 @@ for episode in range(num_episodes):
 
         # Get action from policy
         aprob, h = policy_forward(x)
-        action = 2 if np.random.uniform() < aprob else 3  # 2=RIGHT/UP, 3=LEFT/DOWN
+        # Choose action (deterministic - use most likely action)
+        action_idx = np.argmax(aprob)  # 0, 1, or 2
+        action = [0, 2, 3][action_idx]  # Convert to actual Atari actions (NOOP, UP, DOWN)
 
         # Store the data
         episode_frame_diffs.append(x)
@@ -97,10 +101,10 @@ for episode in range(num_episodes):
     all_dones.extend(episode_dones)
     episode_rewards.append(episode_reward)
 
+    action_counts = np.bincount(episode_actions, minlength=6)
     print(f"Episode {episode+1}/{num_episodes}: "
           f"Steps={episode_steps}, Reward={episode_reward:.0f}, "
-          f"Action distribution: UP={np.sum(np.array(episode_actions)==2)}, "
-          f"DOWN={np.sum(np.array(episode_actions)==3)}")
+          f"Action distribution: NOOP={action_counts[0]}, UP={action_counts[2]}, DOWN={action_counts[3]}")
 
 env.close()
 
@@ -116,7 +120,8 @@ print(f"\nGeneration complete!")
 print(f"Total timesteps: {len(all_frame_diffs)}")
 print(f"Average episode reward: {np.mean(episode_rewards):.2f}")
 print(f"Average episode length: {len(all_frame_diffs) / num_episodes:.1f} steps")
-print(f"Action distribution: UP (action 2)={np.sum(all_actions==2)}, "
+print(f"Action distribution: NOOP (action 0)={np.sum(all_actions==0)}, "
+      f"UP (action 2)={np.sum(all_actions==2)}, "
       f"DOWN (action 3)={np.sum(all_actions==3)}")
 print(f"Win rate: {np.sum(np.array(episode_rewards) > 0) / len(episode_rewards) * 100:.1f}%")
 
