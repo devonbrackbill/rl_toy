@@ -20,11 +20,13 @@ imitation_episodes = 1000  # how many episodes to train on model data before swi
 imitation_learning_rate = 1e-1  # learning rate for imitation learning
 eval_frequency = 10  # evaluate every N imitation episodes
 
-def load_model_demonstrations(data_fraction=1.0):
-    """ Load model-generated demonstration data
+def load_model_demonstrations(data_fraction=1.0, held_out_fraction=0.2):
+    """ Load model-generated demonstration data with fixed held-out set
 
     Args:
-        data_fraction: Fraction of data to use (0.0 to 1.0)
+        data_fraction: Fraction of TRAINING data to use (0.0 to 1.0)
+        held_out_fraction: Fraction of total data to hold out for validation (default: 0.2)
+                          This held-out set is FIXED across all runs
     """
     demo_files = glob.glob("model_demonstrations/model_demo_*.npz")
     if not demo_files:
@@ -35,28 +37,44 @@ def load_model_demonstrations(data_fraction=1.0):
     print(f"Loading model demonstrations from: {latest_file}")
 
     data = np.load(latest_file)
-    frame_diffs = data['frame_diffs']
-    actions = data['actions']
+    all_frame_diffs = data['frame_diffs']
+    all_actions = data['actions']
 
-    # Use only a fraction of the data
+    # First, split into train and held-out sets (fixed split)
+    num_total = len(all_frame_diffs)
+    num_held_out = int(num_total * held_out_fraction)
+    num_available_train = num_total - num_held_out
+
+    # Use fixed random seed for reproducible train/held-out split
+    rng = np.random.RandomState(42)
+    indices = rng.permutation(num_total)
+    train_pool_indices = indices[:num_available_train]
+    held_out_indices = indices[num_available_train:]
+
+    held_out_frame_diffs = all_frame_diffs[held_out_indices]
+    held_out_actions = all_actions[held_out_indices]
+
+    # Now sample from the training pool according to data_fraction
     if data_fraction < 1.0:
-        num_samples = int(len(frame_diffs) * data_fraction)
-        indices = np.random.choice(len(frame_diffs), num_samples, replace=False)
-        indices.sort()  # maintain temporal order
-        frame_diffs = frame_diffs[indices]
-        actions = actions[indices]
-        print(f"Using {data_fraction*100:.1f}% of data: {num_samples}/{len(data['frame_diffs'])} samples")
+        num_train_samples = int(num_available_train * data_fraction)
+        sampled_indices = rng.choice(train_pool_indices, num_train_samples, replace=False)
+        train_frame_diffs = all_frame_diffs[sampled_indices]
+        train_actions = all_actions[sampled_indices]
+        print(f"Using {data_fraction*100:.1f}% of training data: {num_train_samples}/{num_available_train} samples")
     else:
-        print(f"Using all data: {len(frame_diffs)} samples")
+        train_frame_diffs = all_frame_diffs[train_pool_indices]
+        train_actions = all_actions[train_pool_indices]
+        print(f"Using all training data: {num_available_train} samples")
 
-    print(f"Action distribution: NOOP={np.sum(actions==0)}, UP={np.sum(actions==2)}, DOWN={np.sum(actions==3)}")
+    print(f"Fixed held-out set: {num_held_out} samples")
+    print(f"Train action distribution: NOOP={np.sum(train_actions==0)}, UP={np.sum(train_actions==2)}, DOWN={np.sum(train_actions==3)}")
+    print(f"Held-out action distribution: NOOP={np.sum(held_out_actions==0)}, UP={np.sum(held_out_actions==2)}, DOWN={np.sum(held_out_actions==3)}")
 
-    return frame_diffs, actions
+    return (train_frame_diffs, train_actions), (held_out_frame_diffs, held_out_actions)
 
-def imitation_learning_step(frame_diffs, actions, model):
-    """ Perform one step of imitation learning """
+def compute_accuracy(frame_diffs, actions, model):
+    """ Compute accuracy on a dataset without updating the model """
     # Convert actions to one-hot encoding
-    # actions are 0, 2, 3 -> map to indices 0, 1, 2
     action_to_idx = {0: 0, 2: 1, 3: 2}
     y_indices = np.array([action_to_idx[a] for a in actions])
     num_samples = len(actions)
@@ -83,6 +101,29 @@ def imitation_learning_step(frame_diffs, actions, model):
     predictions = np.argmax(p, axis=0)  # (num_samples,)
     accuracy = np.mean(predictions == y_indices)
 
+    return loss, accuracy
+
+def imitation_learning_step(frame_diffs, actions, model):
+    """ Perform one step of imitation learning """
+    # Compute loss and accuracy
+    loss, accuracy = compute_accuracy(frame_diffs, actions, model)
+
+    # Convert actions to one-hot encoding
+    action_to_idx = {0: 0, 2: 1, 3: 2}
+    y_indices = np.array([action_to_idx[a] for a in actions])
+    num_samples = len(actions)
+    y_true = np.zeros((num_samples, 3))
+    y_true[np.arange(num_samples), y_indices] = 1
+
+    # Use all data at once
+    X = frame_diffs.T  # (6400, num_samples)
+
+    # Forward pass
+    h = np.dot(model['W1'], X)  # (200, num_samples)
+    h[h < 0] = 0  # ReLU
+    logits = np.dot(model['W2'], h)  # (3, num_samples)
+    p = softmax(logits)  # (3, num_samples)
+
     # Compute gradients
     dlogits = p - y_true.T  # (3, num_samples)
     dW2 = np.dot(dlogits, h.T) / num_samples  # (3, 200)
@@ -96,7 +137,7 @@ def imitation_learning_step(frame_diffs, actions, model):
 
     return loss, accuracy
 
-def evaluate_policy(model, env, num_episodes=3):
+def evaluate_policy(model, env, num_episodes=20):
     """ Evaluate the current policy """
     total_reward = 0
     total_steps = 0
@@ -150,21 +191,25 @@ def train_with_data_fraction(data_fraction, experiment_name, num_rl_episodes=100
     grad_buffer = {k: np.zeros_like(v) for k, v in model.items()}
     rmsprop_cache = {k: np.zeros_like(v) for k, v in model.items()}
 
-    # Load demonstration data
+    # Load demonstration data with fixed held-out set
     demo_data = load_model_demonstrations(data_fraction)
     if demo_data is None:
         print("Failed to load demonstration data!")
         return
 
-    frame_diffs, actions = demo_data
+    (train_frame_diffs, train_actions), (held_out_frame_diffs, held_out_actions) = demo_data
 
     # Initialize environment
     env = gym.make("ALE/Pong-v5")
 
     # Evaluate initial random policy
     print("\nEvaluating initial random policy...")
-    init_reward, init_steps = evaluate_policy(model, env, num_episodes=3)
+    init_reward, init_steps = evaluate_policy(model, env, num_episodes=20)
     print(f"Initial policy: avg_reward={init_reward:.2f}, avg_steps={init_steps:.1f}")
+
+    # Compute initial held-out accuracy
+    init_held_out_loss, init_held_out_acc = compute_accuracy(held_out_frame_diffs, held_out_actions, model)
+    print(f"Initial held-out: loss={init_held_out_loss:.4f}, accuracy={init_held_out_acc:.3f}")
 
     # Imitation learning phase
     print(f"\nStarting imitation learning for {imitation_episodes} episodes...")
@@ -172,23 +217,29 @@ def train_with_data_fraction(data_fraction, experiment_name, num_rl_episodes=100
 
     eval_results = []
     for i in range(imitation_episodes):
-        loss, accuracy = imitation_learning_step(frame_diffs, actions, model)
+        train_loss, train_accuracy = imitation_learning_step(train_frame_diffs, train_actions, model)
 
         if (i + 1) % eval_frequency == 0:
+            # Compute held-out accuracy
+            held_out_loss, held_out_accuracy = compute_accuracy(held_out_frame_diffs, held_out_actions, model)
+
             # Evaluate current policy
-            avg_reward, avg_steps = evaluate_policy(model, env, num_episodes=3)
+            avg_reward, avg_steps = evaluate_policy(model, env, num_episodes=20)
             eval_results.append({
                 'episode': i + 1,
-                'loss': loss,
-                'accuracy': accuracy,
+                'train_loss': train_loss,
+                'train_accuracy': train_accuracy,
+                'held_out_loss': held_out_loss,
+                'held_out_accuracy': held_out_accuracy,
                 'avg_reward': avg_reward,
                 'avg_steps': avg_steps
             })
             print(f"Episode {i+1}/{imitation_episodes} | "
-                  f"Loss: {loss:.4f} | Acc: {accuracy:.3f} | "
-                  f"Eval reward: {avg_reward:.2f} | Steps: {avg_steps:.1f}")
+                  f"Train - Loss: {train_loss:.4f}, Acc: {train_accuracy:.3f} | "
+                  f"Held-out - Loss: {held_out_loss:.4f}, Acc: {held_out_accuracy:.3f} | "
+                  f"Eval reward: {avg_reward:.2f}")
         else:
-            print(f"Episode {i+1}/{imitation_episodes} | Loss: {loss:.4f} | Acc: {accuracy:.3f}")
+            print(f"Episode {i+1}/{imitation_episodes} | Train Loss: {train_loss:.4f} | Train Acc: {train_accuracy:.3f}")
 
     # Save model after imitation learning
     os.makedirs("experiments", exist_ok=True)
@@ -277,8 +328,8 @@ if __name__ == "__main__":
                        help='Data fractions to experiment with (e.g., 0.01 0.05 0.1 0.25 0.5 1.0)')
     parser.add_argument('--rl-episodes', type=int, default=0,
                        help='Number of RL episodes to run after imitation (default: 0)')
-    parser.add_argument('--imitation-episodes', type=int, default=1000,
-                       help='Number of imitation learning episodes (default: 1000)')
+    parser.add_argument('--imitation-episodes', type=int, default=500,
+                       help='Number of imitation learning episodes (default: 500)')
 
     args = parser.parse_args()
 
