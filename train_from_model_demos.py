@@ -87,7 +87,7 @@ def imitation_learning_step(frame_diffs, actions, model):
     dlogits = p - y_true.T  # (3, num_samples)
     dW2 = np.dot(dlogits, h.T) / num_samples  # (3, 200)
     dh = np.dot(model['W2'].T, dlogits)  # (200, num_samples)
-    dh[:, h.T <= 0] = 0  # backprop through ReLU
+    dh[h <= 0] = 0  # backprop through ReLU
     dW1 = np.dot(dh, X.T) / num_samples  # (200, 6400)
 
     # Update model
