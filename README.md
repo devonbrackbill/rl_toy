@@ -19,6 +19,8 @@ The implementation uses a simple 2-layer neural network built from scratch with 
 - Frame preprocessing (cropping, downsampling, binarization, differencing)
 - Model checkpointing and resumable training
 - Video recording of gameplay sessions
+- **Synthetic demonstration generation from trained models**
+- **Knowledge transfer experiments with varying data amounts**
 
 ## Installation
 
@@ -52,13 +54,33 @@ python train.py
 ```
 
 The training process:
-- Loads human demonstrations from the most recent `.npz` file
-- Runs 1000 episodes of imitation learning
+- Loads human demonstrations from the most recent `.npz` file (if `use_imitation = True`)
+- Runs 1000 episodes of imitation learning (if enabled)
 - Continues with policy gradient RL indefinitely
 - Saves checkpoints to `save.p` every 100 episodes
 - Prints episode statistics (episode number, reward, running mean reward)
+- Logs all episodes to `training_log.csv` for later analysis
 
-Training will automatically resume from `save.p` if it exists.
+Training will automatically resume from `save.p` if `resume = True`.
+
+### Monitor Training Progress
+
+While training is running (or after), visualize the progress:
+
+```bash
+python plot_training.py
+```
+
+This will:
+- Load data from `training_log.csv`
+- Generate plots showing:
+  - Episode rewards over time (with 50-episode moving average)
+  - Running mean reward (with winning/losing regions highlighted)
+  - Summary statistics
+- Save visualization to `training_progress.png`
+- Display the plot interactively
+
+You can run this anytime to check training progress without interrupting the training process.
 
 ### 3. Test Action Mappings (Optional)
 
@@ -67,6 +89,76 @@ Verify keyboard-to-action mappings:
 ```bash
 python test_actions.py
 ```
+
+## Knowledge Transfer Experiments
+
+Once you have a trained model, you can study how efficiently knowledge transfers through imitation learning.
+
+### 1. Generate Synthetic Demonstrations
+
+Use your trained model to generate demonstration data:
+
+```bash
+python generate_demonstrations.py
+```
+
+This will:
+- Load the trained model from `save.p`
+- Play multiple episodes using the trained policy
+- Save gameplay data to `model_demonstrations/` directory
+- Print statistics about the generated demonstrations
+
+You can edit the script to change `num_episodes` to generate more or fewer demonstrations.
+
+### 2. Train New Models with Varying Data Amounts
+
+Experiment with different amounts of demonstration data:
+
+```bash
+# Train with default fractions (10%, 25%, 50%, 75%, 100%)
+python train_from_model_demos.py
+
+# Custom data fractions
+python train_from_model_demos.py --fractions 0.05 0.1 0.2 0.5 1.0
+
+# Include some RL episodes after imitation
+python train_from_model_demos.py --rl-episodes 50
+
+# Change number of imitation episodes
+python train_from_model_demos.py --imitation-episodes 500
+```
+
+This will:
+- Train separate models with different amounts of demonstration data
+- Evaluate each model periodically during training
+- Save models and results to `experiments/` directory
+- Print training progress and final statistics
+
+### 3. Analyze Results
+
+Compare the learning efficiency across different data amounts:
+
+```bash
+python analyze_results.py
+```
+
+This will:
+- Load all experiment results from `experiments/` directory
+- Print summary statistics for each experiment
+- Generate comparison plots showing:
+  - Training loss over time
+  - Action prediction accuracy
+  - Evaluation rewards
+  - Final performance vs. data amount
+- Save plots to `experiments/learning_curves_comparison.png`
+
+### Experiment Goals
+
+This setup lets you answer questions like:
+- **Data efficiency**: How much demonstration data is needed to reach good performance?
+- **Diminishing returns**: Does using 100% vs 50% of data make a significant difference?
+- **Learning speed**: Do models with more data converge faster?
+- **Performance ceiling**: Is there a minimum data amount below which models fail to learn?
 
 ## Architecture
 
@@ -107,14 +199,26 @@ Action: Binary decision (UP/RIGHT vs DOWN/LEFT)
 
 ```
 .
-├── train.py              # Main training script
-├── play.py               # Interactive human gameplay recorder
-├── test_actions.py       # Action mapping testing utility
-├── requirements.txt      # Python dependencies
-├── save.p               # Model checkpoint (created during training)
-└── human_pong/          # Human demonstration data (created by play.py)
-    ├── *.npz            # Gameplay data files
-    └── *.mp4            # Gameplay videos
+├── train.py                      # Main training script
+├── play.py                       # Interactive human gameplay recorder
+├── test_actions.py               # Action mapping testing utility
+├── generate_demonstrations.py    # Generate synthetic demos from trained model
+├── train_from_model_demos.py    # Train new models with varying data amounts
+├── analyze_results.py            # Analyze and visualize experiment results
+├── plot_training.py              # Plot training progress from logs
+├── requirements.txt              # Python dependencies
+├── save.p                        # Model checkpoint (created during training)
+├── training_log.csv              # Training logs (created during training)
+├── training_progress.png         # Training visualization (created by plot_training.py)
+├── human_pong/                   # Human demonstration data (created by play.py)
+│   ├── *.npz                     # Gameplay data files
+│   └── *.mp4                     # Gameplay videos
+├── model_demonstrations/         # Synthetic demos (created by generate_demonstrations.py)
+│   └── *.npz                     # Model-generated gameplay data
+└── experiments/                  # Experiment results (created by train_from_model_demos.py)
+    ├── *_after_imitation.p       # Trained model checkpoints
+    ├── *_results.npz             # Evaluation metrics
+    └── learning_curves_comparison.png  # Results visualization
 ```
 
 ## Hyperparameters
