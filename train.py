@@ -14,7 +14,7 @@ resume = False # resume from previous checkpoint?
 render = False
 
 # imitation learning parameters
-use_imitation = True # whether to use human demonstrations
+use_imitation = False # whether to use human demonstrations
 imitation_episodes = 1000 # how many episodes to train on human data before switching to RL
 imitation_learning_rate = 1e-1 # learning rate for imitation learning (much higher!)
 imitation_batch_size = 200 # larger batches for more stable gradients
@@ -139,6 +139,15 @@ running_reward = None
 reward_sum = 0
 episode_number = 0
 
+# Setup logging
+import csv
+import os
+log_file = 'training_log.csv'
+if not os.path.exists(log_file):
+    with open(log_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['episode', 'episode_reward', 'running_mean_reward'])
+
 # Load human demonstrations for imitation learnings
 human_data = None
 if use_imitation:
@@ -247,6 +256,12 @@ while True:
     # boring book-keeping
     running_reward = reward_sum if running_reward is None else running_reward * 0.99 + reward_sum * 0.01
     print(f'resetting env. episode reward total was {reward_sum:.3f}. running mean: {running_reward:.3f}')
+
+    # Log to CSV
+    with open(log_file, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([episode_number, reward_sum, running_reward])
+
     if episode_number % 100 == 0: pickle.dump(model, open('save.p', 'wb'))
     reward_sum = 0
     observation, info = env.reset() # reset env
