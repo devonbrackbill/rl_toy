@@ -6,9 +6,9 @@ import ale_py
 import glob
 import os
 import argparse
+from pong_utils import D, H, num_actions, softmax, prepro, discount_rewards, policy_forward, policy_backward
 
 # hyperparameters
-H = 200  # number of hidden layer neurons
 batch_size = 10  # every how many episodes to do a param update?
 learning_rate = 1e-4
 gamma = 0.99  # discount factor for reward
@@ -19,47 +19,6 @@ render = False
 imitation_episodes = 1000  # how many episodes to train on model data before switching to RL
 imitation_learning_rate = 1e-1  # learning rate for imitation learning
 eval_frequency = 10  # evaluate every N imitation episodes
-
-# model initialization
-D = 80 * 80  # input dimensionality: 80x80 grid
-
-def sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-x))
-
-def prepro(I):
-    """ prepro 210x160x3 uint8 frame into 6400 (80x80) 1D float vector """
-    I = I[35:195]  # crop
-    I = I[::2,::2,0]  # downsample by factor of 2
-    I[I == 144] = 0  # erase background (background type 1)
-    I[I == 109] = 0  # erase background (background type 2)
-    I[I != 0] = 1  # everything else (paddles, ball) just set to 1
-    return I.astype(np.float64).ravel()
-
-def discount_rewards(r):
-    """ take 1D float array of rewards and compute discounted reward """
-    discounted_r = np.zeros_like(r)
-    running_add = 0
-    for t in reversed(range(0, r.size)):
-        if r[t] != 0:
-            running_add = 0  # reset the sum, since this was a game boundary (pong specific!)
-        running_add = running_add * gamma + r[t]
-        discounted_r[t] = running_add
-    return discounted_r
-
-def policy_forward(x, model):
-    h = np.dot(model['W1'], x)
-    h[h<0] = 0  # ReLU nonlinearity
-    logp = np.dot(model['W2'], h)
-    p = sigmoid(logp)
-    return p, h  # return probability of taking action 2, and hidden state
-
-def policy_backward(eph, epdlogp, epx, model):
-    """ backward pass. (eph is array of intermediate hidden states) """
-    dW2 = np.dot(eph.T, epdlogp).ravel()
-    dh = np.outer(epdlogp, model['W2'])
-    dh[eph <= 0] = 0  # backprop prelu
-    dW1 = np.dot(dh.T, epx)
-    return {'W1':dW1, 'W2':dW2}
 
 def load_model_demonstrations(data_fraction=1.0):
     """ Load model-generated demonstration data
@@ -90,38 +49,46 @@ def load_model_demonstrations(data_fraction=1.0):
     else:
         print(f"Using all data: {len(frame_diffs)} samples")
 
-    print(f"Action distribution: UP={np.sum(actions==2)}, DOWN={np.sum(actions==3)}")
+    print(f"Action distribution: NOOP={np.sum(actions==0)}, UP={np.sum(actions==2)}, DOWN={np.sum(actions==3)}")
 
     return frame_diffs, actions
 
 def imitation_learning_step(frame_diffs, actions, model):
     """ Perform one step of imitation learning """
-    # Convert actions to binary: 2 (RIGHT/UP) -> 1, 3 (LEFT/DOWN) -> 0
-    y_true = (actions == 2).astype(np.float64)
+    # Convert actions to one-hot encoding
+    # actions are 0, 2, 3 -> map to indices 0, 1, 2
+    action_to_idx = {0: 0, 2: 1, 3: 2}
+    y_indices = np.array([action_to_idx[a] for a in actions])
+    num_samples = len(actions)
+
+    # Create one-hot encoding (num_samples, 3)
+    y_true = np.zeros((num_samples, 3))
+    y_true[np.arange(num_samples), y_indices] = 1
 
     # Use all data at once
     X = frame_diffs.T  # (6400, num_samples)
-    y = y_true  # (num_samples,)
 
     # Forward pass
     h = np.dot(model['W1'], X)  # (200, num_samples)
     h[h < 0] = 0  # ReLU
-    logits = np.dot(model['W2'], h)  # (num_samples,)
-    p = sigmoid(logits)
+    logits = np.dot(model['W2'], h)  # (3, num_samples)
+    p = softmax(logits)  # (3, num_samples)
 
-    # Compute loss (binary cross-entropy)
-    loss = -np.mean(y * np.log(p + 1e-8) + (1 - y) * np.log(1 - p + 1e-8))
+    # Compute loss (categorical cross-entropy)
+    # Clip probabilities to avoid log(0)
+    p_clipped = np.clip(p, 1e-8, 1.0)
+    loss = -np.mean(np.sum(y_true.T * np.log(p_clipped), axis=0))
 
     # Compute accuracy
-    predictions = (p > 0.5).astype(np.float64)
-    accuracy = np.mean(predictions == y)
+    predictions = np.argmax(p, axis=0)  # (num_samples,)
+    accuracy = np.mean(predictions == y_indices)
 
     # Compute gradients
-    dlogits = p - y  # (num_samples,)
-    dW2 = np.dot(h, dlogits) / len(y)  # (200,)
-    dh = np.outer(dlogits, model['W2'])  # (num_samples, 200)
-    dh[h.T <= 0] = 0  # backprop through ReLU
-    dW1 = np.dot(dh.T, X.T) / len(y)  # (200, 6400)
+    dlogits = p - y_true.T  # (3, num_samples)
+    dW2 = np.dot(dlogits, h.T) / num_samples  # (3, 200)
+    dh = np.dot(model['W2'].T, dlogits)  # (200, num_samples)
+    dh[:, h.T <= 0] = 0  # backprop through ReLU
+    dW1 = np.dot(dh, X.T) / num_samples  # (200, 6400)
 
     # Update model
     model['W1'] -= imitation_learning_rate * dW1
@@ -145,7 +112,9 @@ def evaluate_policy(model, env, num_episodes=3):
             prev_x = cur_x
 
             aprob, _ = policy_forward(x, model)
-            action = 2 if np.random.uniform() < aprob else 3
+            # Choose action (deterministic - use most likely action)
+            action_idx = np.argmax(aprob)  # 0, 1, or 2
+            action = [0, 2, 3][action_idx]  # Convert to actual Atari actions
 
             observation, reward, terminated, truncated, _ = env.step(action)
             episode_reward += reward
@@ -176,7 +145,7 @@ def train_with_data_fraction(data_fraction, experiment_name, num_rl_episodes=100
     # Initialize fresh model
     model = {}
     model['W1'] = np.random.randn(H, D) / np.sqrt(D)
-    model['W2'] = np.random.randn(H) / np.sqrt(H)
+    model['W2'] = np.random.randn(num_actions, H) / np.sqrt(H)  # 3 actions: NOOP, UP, DOWN
 
     grad_buffer = {k: np.zeros_like(v) for k, v in model.items()}
     rmsprop_cache = {k: np.zeros_like(v) for k, v in model.items()}
@@ -250,13 +219,17 @@ def train_with_data_fraction(data_fraction, experiment_name, num_rl_episodes=100
             x = cur_x - prev_x if prev_x is not None else np.zeros(D)
             prev_x = cur_x
 
-            aprob, h = policy_forward(x, model)
-            action = 2 if np.random.uniform() < aprob else 3
+            aprob, h = policy_forward(x, model)  # aprob is (3,)
+            # Sample action from probability distribution
+            action_idx = np.random.choice(3, p=aprob)
+            action = [0, 2, 3][action_idx]
 
             xs.append(x)
             hs.append(h)
-            y = 1 if action == 2 else 0
-            dlogps.append(y - aprob)
+            # Compute gradient: one-hot encoding minus predicted probabilities
+            y = np.zeros(3)
+            y[action_idx] = 1.0
+            dlogps.append(y - aprob)  # (3,)
 
             observation, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
@@ -268,7 +241,7 @@ def train_with_data_fraction(data_fraction, experiment_name, num_rl_episodes=100
 
                 epx = np.vstack(xs)
                 eph = np.vstack(hs)
-                epdlogp = np.vstack(dlogps)
+                epdlogp = np.vstack(dlogps)  # (timesteps, 3)
                 epr = np.vstack(drs)
                 xs, hs, dlogps, drs = [], [], [], []
 
@@ -276,7 +249,7 @@ def train_with_data_fraction(data_fraction, experiment_name, num_rl_episodes=100
                 discounted_epr -= np.mean(discounted_epr)
                 discounted_epr /= (np.std(discounted_epr) + 1e-8)
 
-                epdlogp *= discounted_epr
+                epdlogp *= discounted_epr  # (timesteps, 3) * (timesteps, 1)
                 grad = policy_backward(eph, epdlogp, epx, model)
                 for k in model:
                     grad_buffer[k] += grad[k]
