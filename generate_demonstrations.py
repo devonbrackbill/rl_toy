@@ -9,7 +9,7 @@ import os
 # hyperparameters
 H = 200  # number of hidden layer neurons
 D = 80 * 80  # input dimensionality: 80x80 grid
-num_episodes = 10  # number of episodes to record
+num_episodes = 100  # number of episodes to record
 output_dir = "model_demonstrations"  # directory to save demonstrations
 
 # Load the trained model

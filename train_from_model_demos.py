@@ -273,8 +273,8 @@ def train_with_data_fraction(data_fraction, experiment_name, num_rl_episodes=100
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train from model demonstrations with varying data amounts')
     parser.add_argument('--fractions', nargs='+', type=float,
-                       default=[0.1, 0.25, 0.5, 0.75, 1.0],
-                       help='Data fractions to experiment with (e.g., 0.1 0.25 0.5)')
+                       default=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0],
+                       help='Data fractions to experiment with (e.g., 0.01 0.05 0.1 0.25 0.5 1.0)')
     parser.add_argument('--rl-episodes', type=int, default=0,
                        help='Number of RL episodes to run after imitation (default: 0)')
     parser.add_argument('--imitation-episodes', type=int, default=1000,
